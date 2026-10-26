@@ -57,8 +57,12 @@ func (a *app) signedIn(prof *netease.Profile) {
 	if a.route.page == pagePlaylist {
 		a.loadPlaylist(a.route.playlist, false)
 	}
-	if a.searched != "" {
-		a.runSearch(a.searched)
+	a.refreshSearch()
+	a.catalog = catalogState{}
+	if a.route.page == pageArtist || a.route.page == pageAlbum || a.route.page == pageUser {
+		a.loadEntity(a.route)
+	} else if a.route.page == pagePodcast {
+		a.loadPodcast(a.route.entity)
 	}
 	a.loadHome()
 	if prof == nil {
@@ -322,19 +326,39 @@ func (a *app) menuItem(c *ui.Context, icon *ui.SVG, label, shortcut string) ui.E
 	return b
 }
 
-// myPlaylists lists the listener's playlists in the sidebar: those they
-// made, if mine, with a button to make one and a menu to rename them.
-func (a *app) myPlaylists(c *ui.Context, title string, lists []netease.Playlist, mine bool) {
+// myPlaylists lists the listener's playlists under a header that opens
+// and closes them: those they made, if mine, with a button to make one
+// and a menu to rename them.
+func (a *app) myPlaylists(c *ui.Context, title string, lists []netease.Playlist, mine bool, collapsed *bool) {
 	if len(lists) == 0 {
 		return
 	}
 	p := a.pal
-	ui.Row(c.Key(title)).AlignItems(ui.Center).Margin(18, 4, 6, 10).Children(func() {
-		ui.Text(c, title).FontSize(11.5).FontWeight(600).TextColor(p.faint).Grow(1)
+	ui.Row(c.Key(title)).AlignItems(ui.Center).Margin(18, 4, 6, 6).Children(func() {
+		b := ui.ButtonBase(c.Key("toggle")).Grow(1).Height(26).PaddingX(4).Gap(6).Radius(6).
+			AlignItems(ui.Center).Justify(ui.Start).Role(ui.RoleDisclosure).Label(title)
+		if b.Clicked() {
+			*collapsed = !*collapsed
+		}
+		b.Expanded(!*collapsed)
+		if b.Hovered() {
+			b.Background(p.hover)
+		}
+		b.Children(func() {
+			ui.Text(c, title).FontSize(11.5).FontWeight(600).TextColor(p.faint).Grow(1)
+			arrow := iconDown
+			if *collapsed {
+				arrow = iconForward
+			}
+			ui.Icon(c, arrow).Size(12, 12).TextColor(p.faint)
+		})
 		if mine && iconButton(c.Key("new"), iconPlus, 13, p.faint, "新建歌单").Clicked() {
 			a.newPlaylist(nil)
 		}
 	})
+	if *collapsed {
+		return
+	}
 	for i := range lists {
 		pl := &lists[i]
 		selected := a.route.page == pagePlaylist && a.route.playlist == pl.ID && !a.nowPlaying

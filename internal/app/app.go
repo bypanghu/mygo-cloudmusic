@@ -20,11 +20,18 @@ const (
 	pagePlaylist
 	pageSearch
 	pageFM
+	pageArtist
+	pageAlbum
+	pageUser
+	pagePodcast
 )
 
 type route struct {
 	page     pageKind
 	playlist int64
+	entity   int64
+	query    string
+	kind     netease.SearchType
 }
 
 // app is the state both windows show. Everything in it is read and changed
@@ -68,18 +75,17 @@ type app struct {
 	pageScroll ui.ScrollState
 	navScroll  ui.ScrollState
 
+	mineCollapsed, savedCollapsed bool
+
 	query     string
-	searched  string
-	results   []netease.Track
-	searching bool
-	searchErr string
 	searchBox ui.Handle
+	searches  searchState
+	catalog   catalogState
 
 	nowPlaying  bool
 	npOpen      bool      // Now Playing as it last showed: open or not
 	npChangedAt time.Time // when it last opened or closed
 	npPane      int       // paneLyrics, paneQueue, paneStage or paneComments
-	npPaneTop   float32   // how far the cover beside the pane starts below its top
 	lyricScroll ui.ScrollState
 	lyricGlide  lyricGlide
 	lyricAt     int

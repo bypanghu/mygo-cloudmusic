@@ -7,6 +7,13 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
+var showSettings = (*app).openSettings
+
+func (a *app) settingsButton(c *ui.Context, color ui.Color) {
+	iconButton(c.Key("settings"), iconSettings, 18, color, "设置").
+		Tooltip("设置").OnClick(func() { showSettings(a) })
+}
+
 // openSettings shows the settings window, opening it the first time.
 func (a *app) openSettings() {
 	if a.settingsWin != nil {

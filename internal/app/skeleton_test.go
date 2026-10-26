@@ -25,8 +25,8 @@ var skeletonScenes = []struct {
 		a.loadingPl[7] = true
 	}},
 	{"search", func(a *app) {
-		a.route = route{page: pageSearch}
-		a.searched, a.searching = "春日影", true
+		a.route = route{page: pageSearch, query: "春日影", kind: netease.SearchSongs}
+		a.searches.entries = map[route]*searchEntry{a.route: {loading: true}}
 	}},
 	{"login", func(a *app) { a.login = loginState{open: true} }},
 	{"comments", func(a *app) {

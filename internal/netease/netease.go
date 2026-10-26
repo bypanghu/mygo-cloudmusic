@@ -22,28 +22,82 @@ const UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/6
 var httpClient = &http.Client{Timeout: 20 * time.Second}
 
 type Artist struct {
-	ID   int64  `json:"id"`
-	Name string `json:"name"`
+	ID        int64    `json:"id"`
+	Name      string   `json:"name"`
+	PicURL    string   `json:"picUrl"`
+	Img1v1URL string   `json:"img1v1Url"`
+	Alias     []string `json:"alias"`
+	BriefDesc string   `json:"briefDesc"`
+	MusicSize int      `json:"musicSize"`
+	AlbumSize int      `json:"albumSize"`
+	Followed  bool     `json:"followed"`
 }
 
 type Album struct {
-	ID     int64  `json:"id"`
-	Name   string `json:"name"`
-	PicURL string `json:"picUrl"`
+	ID          int64    `json:"id"`
+	Name        string   `json:"name"`
+	PicURL      string   `json:"picUrl"`
+	Artist      Artist   `json:"artist"`
+	Artists     []Artist `json:"artists"`
+	PublishTime int64    `json:"publishTime"`
+	Size        int      `json:"size"`
+	Description string   `json:"description"`
+}
+
+type User struct {
+	UserID        int64  `json:"userId"`
+	Nickname      string `json:"nickname"`
+	AvatarURL     string `json:"avatarUrl"`
+	Signature     string `json:"signature"`
+	PlaylistCount int    `json:"playlistCount"`
+	Followeds     int    `json:"followeds"`
+	Follows       int    `json:"follows"`
 }
 
 type Track struct {
-	ID       int64    `json:"id"`
-	Name     string   `json:"name"`
-	Artists  []Artist `json:"ar"`
-	Album    Album    `json:"al"`
-	Duration int64    `json:"dt"` // milliseconds
-	Fee      int      `json:"fee"`
-	Alias    []string `json:"alia"`
+	ID          int64    `json:"id"`
+	Name        string   `json:"name"`
+	Artists     []Artist `json:"ar"`
+	Album       Album    `json:"al"`
+	Duration    int64    `json:"dt"` // milliseconds
+	Fee         int      `json:"fee"`
+	Alias       []string `json:"alia"`
+	ProgramID   int64    `json:"programId,omitempty"`
+	PodcastID   int64    `json:"podcastId,omitempty"`
+	Description string   `json:"description,omitempty"`
 	// Reason says why a daily recommendation was picked.
 	Reason string `json:"reason"`
 	// Privilege is what the listener may do with the track, if known.
 	Privilege *Privilege `json:"privilege"`
+}
+
+// UnmarshalJSON accepts both the current song fields and the legacy album API fields.
+func (t *Track) UnmarshalJSON(data []byte) error {
+	type track Track
+	var wire struct {
+		track
+		Artists        []Artist  `json:"artists"`
+		Album          Album     `json:"album"`
+		Duration       int64     `json:"duration"`
+		ModernArtists  *[]Artist `json:"ar"`
+		ModernAlbum    *Album    `json:"al"`
+		ModernDuration *int64    `json:"dt"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*t = Track(wire.track)
+	t.Artists, t.Album, t.Duration = wire.Artists, wire.Album, wire.Duration
+	if wire.ModernArtists != nil {
+		t.Artists = *wire.ModernArtists
+	}
+	if wire.ModernAlbum != nil {
+		t.Album = *wire.ModernAlbum
+	}
+	if wire.ModernDuration != nil {
+		t.Duration = *wire.ModernDuration
+	}
+	return nil
 }
 
 // Privilege is what NetEase lets the listener signed in, or nobody, do
@@ -80,6 +134,11 @@ func (t *Track) ArtistNames() string {
 // privilege says, or else as its fee does for anyone, VIP songs (1) and
 // paid albums (4) giving only a preview.
 func (t *Track) Playable() bool {
+	if t.ProgramID > 0 {
+		// Paid-program access is decided by the authenticated stream API,
+		// not the music catalogue's VIP fee flags.
+		return t.ID > 0
+	}
 	if t.Privilege != nil {
 		return t.Privilege.St >= 0 && t.Privilege.Pl > 0
 	}
@@ -89,7 +148,12 @@ func (t *Track) Playable() bool {
 func (t *Track) Length() time.Duration { return time.Duration(t.Duration) * time.Millisecond }
 
 // URL is the track's page on the NetEase website.
-func (t *Track) URL() string { return apiBase + "/song?id=" + strconv.FormatInt(t.ID, 10) }
+func (t *Track) URL() string {
+	if t.ProgramID > 0 {
+		return apiBase + "/program?id=" + strconv.FormatInt(t.ProgramID, 10)
+	}
+	return apiBase + "/song?id=" + strconv.FormatInt(t.ID, 10)
+}
 
 type Playlist struct {
 	ID          int64   `json:"id"`
@@ -101,7 +165,9 @@ type Playlist struct {
 	TrackCount  int     `json:"trackCount"`
 	UpdateFreq  string  `json:"updateFrequency"`
 	SpecialType int     `json:"specialType"` // 5: the listener's liked songs
+	Privacy     int     `json:"privacy"`
 	Creator     struct {
+		UserID   int64  `json:"userId"`
 		Nickname string `json:"nickname"`
 	} `json:"creator"`
 	Tracks   []Track `json:"tracks"`
@@ -296,19 +362,8 @@ func SongDetails(ids []int64) ([]Track, error) {
 
 // Search returns the songs matching a query.
 func Search(query string, limit int) ([]Track, error) {
-	var res struct {
-		Result struct {
-			Songs []Track `json:"songs"`
-		} `json:"result"`
-	}
-	q := url.Values{"s": {query}, "type": {"1"}, "limit": {strconv.Itoa(limit)}, "offset": {"0"}}
-	if err := get("/api/cloudsearch/pc", q, &res); err != nil {
-		return nil, err
-	}
-	// Search marks whole catalogues as taken down that the listener may
-	// play, as YOASOBI's for a subscriber: the songs' details say right.
-	detailPrivileges(res.Result.Songs)
-	return res.Result.Songs, nil
+	res, err := SearchPage(query, SearchSongs, limit, 0)
+	return res.Songs, err
 }
 
 var ErrUnavailable = errors.New("this song isn't available to stream")

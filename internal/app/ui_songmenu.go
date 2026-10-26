@@ -24,6 +24,22 @@ func (a *app) songMenu(c *ui.Context, tr *netease.Track, size float32, color ui.
 // playlist or taking it out of pid, the playlist it is listed in, if set.
 func (a *app) songItems(tr *netease.Track, pid int64) func(m *ui.Menu) {
 	return func(m *ui.Menu) {
+		if tr.ProgramID > 0 {
+			if m.Item("复制节目名称").Chosen() {
+				copyText(tr.Name)
+			}
+			if m.Item("复制链接").Chosen() {
+				copyText(tr.URL())
+			}
+			if tr.PodcastID > 0 {
+				m.Separator()
+				if m.Item("查看播客").Chosen() {
+					a.nowPlaying = false
+					a.open(route{page: pagePodcast, entity: tr.PodcastID})
+				}
+			}
+			return
+		}
 		if m.Item("复制歌名").Chosen() {
 			copyText(tr.Name)
 		}
@@ -33,6 +49,21 @@ func (a *app) songItems(tr *netease.Track, pid int64) func(m *ui.Menu) {
 		m.Separator()
 		if m.Item("复制链接").Chosen() {
 			copyText(tr.URL())
+		}
+		linked := tr.Album.ID > 0
+		for _, artist := range tr.Artists {
+			linked = linked || artist.ID > 0
+		}
+		if linked {
+			m.Separator()
+		}
+		for _, artist := range tr.Artists {
+			if artist.ID > 0 && m.Item("查看歌手："+artist.Name).Chosen() {
+				a.open(route{page: pageArtist, entity: artist.ID})
+			}
+		}
+		if tr.Album.ID > 0 && m.Item("查看专辑："+tr.Album.Name).Chosen() {
+			a.open(route{page: pageAlbum, entity: tr.Album.ID})
 		}
 		a.playlistItems(m, tr, pid)
 	}

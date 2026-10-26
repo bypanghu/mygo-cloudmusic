@@ -423,8 +423,15 @@ func (a *app) playerBar(c *ui.Context) {
 			if a.nowPlaying {
 				lyr = p.accent
 			}
-			if iconButton(c.Key("lyrics"), iconLyrics, 16, lyr, "歌词").Clicked() && tr != nil {
+			label := "歌词"
+			if tr != nil && tr.ProgramID > 0 {
+				label = "节目简介"
+			}
+			if iconButton(c.Key("lyrics"), iconLyrics, 16, lyr, label).Clicked() && tr != nil {
 				a.nowPlaying, a.npPane = true, a.lyricsPaneChosen()
+				if tr.ProgramID > 0 {
+					a.npPane = paneProgram
+				}
 			}
 			if iconButton(c.Key("queue"), iconQueue, 16, p.muted, "播放队列").Clicked() && tr != nil {
 				a.nowPlaying, a.npPane = true, paneQueue

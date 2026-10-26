@@ -103,6 +103,11 @@ func (a *app) nowPlayingView(c *ui.Context) {
 func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, accent ui.Color, w, h float32, pointerIn bool) {
 	pl := a.pl
 	a.commentsFor(tr)
+	if tr.ProgramID > 0 && a.npPane != paneQueue && a.npPane != paneProgram {
+		a.npPane = paneProgram
+	} else if tr.ProgramID == 0 && a.npPane == paneProgram {
+		a.npPane = a.lyricsPaneChosen()
+	}
 	if a.npPane != paneQueue {
 		a.queueAt = -1
 	}
@@ -116,6 +121,10 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 				}
 			})
 		})
+		ui.Row(c.Key("settings-entry")).Absolute().Top(0).Right(c.TitleBar().Right + 16).
+			Height(topBar(c)).AlignItems(ui.Center).Children(func() {
+			a.settingsButton(c, white.Alpha(0.7))
+		})
 		if a.npPane == paneStage {
 			// The stage takes the whole view: the lyrics are the show, the
 			// controls a slim bar at the foot.
@@ -125,14 +134,13 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 			return
 		}
 
-		side := float32(math.Min(float64(w)*0.36, 440))
-		// The cover leaves room above it for the pane's tabs.
-		coverSize := min(side, h-404)
-		ui.Row(c).Grow(1).Padding(0, 72, 44, 72).Gap(72).AlignItems(ui.Stretch).Children(func() {
-			var coverTop float32
-			ui.Column(c).Width(side).Justify(ui.Center).Gap(0).Children(func() {
-				coverTop = ui.Box(c.Key("cover-top")).Height(0).LayoutBounds().Y
-				a.npCover(c, tr, art, coverSize)
+		layout := nowPlayingLayout(w, h, topBar(c))
+		// A bounded listening column, not a scaled-up window: the cover
+		// and pane start near the top even on a tall, full-screen display.
+		ui.Row(c).Grow(1).Width(layout.width).AlignSelf(ui.Center).
+			Padding(layout.top, 0, layout.bottom, 0).Gap(layout.gap).AlignItems(ui.Stretch).Children(func() {
+			ui.Column(c).Width(layout.side).Gap(0).Children(func() {
+				a.npCover(c, tr, art, layout.cover)
 
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Margin(36, 0, 18, 0).Children(func() {
 					ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(4).Children(func() {
@@ -140,7 +148,7 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 							a.radioChip(c, r)
 						}
 						ui.Text(c, tr.Name).FontSize(22).FontWeight(700).LetterSpacing(-0.3).SingleLine()
-						ui.Text(c, tr.ArtistNames()+" — "+tr.Album.Name).FontSize(15).TextColor(white.Alpha(0.6)).SingleLine()
+						a.nowPlayingCredits(c, tr, true)
 					})
 					a.likeButton(c.Key("like"), tr, 22, white.Alpha(0.7))
 					a.songMenu(c.Key("more"), tr, 22, white.Alpha(0.7)).Margin(0, -8, 0, 0)
@@ -167,26 +175,15 @@ func (a *app) nowPlayingBody(c *ui.Context, tr *netease.Track, art *artwork, acc
 
 			pane := ui.Column(c.Key("pane")).Grow(1).Basis(0).MinWidth(0)
 			pane.Children(func() {
-				// The pane starts level with the cover beside it. Its tabs come
-				// and go with the pointer, so they sit above it, out of the flow,
-				// never over it.
-				tabs := ui.Row(c.Key("tabs")).Absolute().Left(0).Gap(6)
-				b, tb := pane.LayoutBounds(), tabs.LayoutBounds()
-				if b.H > 0 && tb.H > 0 && coverTop > 0 {
-					if top := max(coverTop-b.Y, tb.H+8); top != a.npPaneTop {
-						a.npPaneTop = top
-						c.AnimationFrame()
-					}
-				} else {
-					c.AnimationFrame() // not laid out yet: the next frame places it
-				}
-				reveal(tabs.Top(a.npPaneTop-8-tb.H), pointerIn).Children(func() { a.paneTabs(c) })
-				ui.Box(c).Height(a.npPaneTop)
+				reveal(ui.Row(c.Key("tabs")).Gap(6).Margin(0, 0, 20, 0), pointerIn).
+					Children(func() { a.paneTabs(c) })
 				switch a.npPane {
 				case paneLyrics:
 					a.lyricsPane(c, tr, h)
 				case paneComments:
 					a.commentsPane(c, tr)
+				case paneProgram:
+					a.programPane(c, tr)
 				default:
 					a.queuePane(c)
 				}
@@ -219,9 +216,15 @@ const (
 	paneQueue
 	paneStage
 	paneComments
+	paneProgram
 )
 
 func (a *app) paneTabs(c *ui.Context) {
+	if tr := a.pl.Current(); tr != nil && tr.ProgramID > 0 {
+		a.paneTab(c, paneProgram, "节目简介")
+		a.paneTab(c, paneQueue, "待播清单")
+		return
+	}
 	a.paneTab(c, paneLyrics, "歌词")
 	a.paneTab(c, paneStage, "律动")
 	a.paneTab(c, paneQueue, "待播清单")
@@ -280,7 +283,7 @@ func (a *app) stageBar(c *ui.Context, tr *netease.Track, art *artwork, accent ui
 				}
 				ui.Column(c).Shrink(1).MinWidth(0).Gap(2).Children(func() {
 					ui.Text(c, tr.Name).FontSize(14).FontWeight(700).SingleLine()
-					ui.Text(c, tr.ArtistNames()).FontSize(12).TextColor(white.Alpha(0.55)).SingleLine()
+					a.nowPlayingCredits(c, tr, false)
 				})
 				a.likeButton(c.Key("like"), tr, 17, white.Alpha(0.6))
 				a.songMenu(c.Key("more"), tr, 17, white.Alpha(0.6)).Margin(0, 0, 0, -10)
@@ -548,7 +551,7 @@ func (a *app) queuePane(c *ui.Context) {
 			a.cover(c, tr.Album.PicURL, 96, 42, 7)
 			ui.Column(c).Grow(1).MinWidth(0).Gap(3).Children(func() {
 				ui.Text(c, tr.Name).FontSize(14).FontWeight(600).SingleLine()
-				ui.Text(c, tr.ArtistNames()).FontSize(12.5).TextColor(white.Alpha(0.55)).SingleLine()
+				a.nowPlayingCredits(c, tr, false)
 			})
 			ui.Text(c, clock(tr.Length())).FontSize(12).FontFeatures("tnum").TextColor(white.Alpha(0.4))
 		})

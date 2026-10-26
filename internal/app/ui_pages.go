@@ -312,33 +312,9 @@ func (a *app) playlistHeader(c *ui.Context, pl *netease.Playlist) {
 	})
 }
 
-func (a *app) searchPage(c *ui.Context) {
-	if len(a.results) == 0 && a.searching {
-		a.trackSkeleton(c, a.pageShimmer(c), true, func(c *ui.Context) {
-			a.heading(c, "“"+a.searched+"”", "搜索")
-		})
-		return
-	}
-	if len(a.results) == 0 {
-		msg := a.searchErr
-		if msg == "" {
-			msg = "没有找到相关歌曲"
-		}
-		top, bottom := a.insets(c)
-		ui.Column(c).Grow(1).Padding(top+pageGap, pagePad, bottom, pagePad).Children(func() {
-			a.heading(c, "“"+a.searched+"”", "搜索")
-			a.centered(c, msg, nil)
-		})
-		return
-	}
-	a.trackRows(c, a.results, true, func(c *ui.Context) {
-		a.heading(c, "“"+a.searched+"”", "搜索")
-	})
-}
-
 // trackRows lists tracks under a header, which scrolls with them; a click
 // plays the list from the track clicked.
-func (a *app) trackRows(c *ui.Context, tracks []netease.Track, covers bool, header func(c *ui.Context)) {
+func (a *app) trackRows(c *ui.Context, tracks []netease.Track, covers bool, header func(c *ui.Context), footer ...func(c *ui.Context)) {
 	p := a.pal
 	cur := a.pl.Current()
 	// A song's menu can take it out of the playlist it is listed in.
@@ -352,7 +328,8 @@ func (a *app) trackRows(c *ui.Context, tracks []netease.Track, covers bool, head
 	// Rows out of view are not built, their marks with them: a list
 	// scrolled away from its start or end has content under the bars.
 	a.underTop, a.underBottom = true, true
-	ui.List(c.Key(a.route), &a.trackList, len(tracks)+1, func(i int) {
+	rows := len(tracks) + 1 + len(footer)
+	ui.List(c.Key(a.route), &a.trackList, rows, func(i int) {
 		if i == 0 {
 			ui.Column(c).Children(func() {
 				a.startMark(c)
@@ -360,8 +337,12 @@ func (a *app) trackRows(c *ui.Context, tracks []netease.Track, covers bool, head
 			})
 			return
 		}
-		if i == len(tracks) {
+		if i == rows-1 {
 			defer a.endMark(c)
+		}
+		if i > len(tracks) {
+			footer[i-len(tracks)-1](c)
+			return
 		}
 		i--
 		tr := &tracks[i]
@@ -408,14 +389,19 @@ func (a *app) trackRows(c *ui.Context, tracks []netease.Track, covers bool, head
 					if !tr.Playable() {
 						ui.Text(c, "VIP").FontSize(9).FontWeight(800).TextColor(p.accent).Padding(0, 4).Radius(3).Border(1, p.accent.Alpha(0.6))
 					}
-					ui.Text(c, tr.ArtistNames()).FontSize(12.5).TextColor(p.muted).SingleLine().Shrink(1).MinWidth(0)
+					a.artistLinks(c, tr.Artists)
 					if tr.Reason != "" {
 						ui.Text(c, tr.Reason).FontSize(10.5).FontWeight(600).TextColor(p.accent).Padding(1, 6).Radius(999).Background(p.accent.Alpha(0.1)).SingleLine()
 					}
 				})
 			})
 			if wide {
-				ui.Text(c, tr.Album.Name).Grow(2).Basis(0).MinWidth(0).FontSize(12.5).TextColor(p.muted).SingleLine()
+				id := tr.Album.ID
+				ui.ButtonBase(c.Key("album")).Grow(2).Basis(0).MinWidth(0).Justify(ui.Start).
+					Label("查看专辑：" + tr.Album.Name).Disabled(id <= 0).
+					OnClick(func() { a.open(route{page: pageAlbum, entity: id}) }).Children(func() {
+					ui.Text(c, tr.Album.Name).FontSize(12.5).TextColor(p.muted).SingleLine().Shrink(1).MinWidth(0)
+				})
 			}
 			// A liked song's heart shows; the others' as the pointer is on them.
 			ui.Box(c).Size(32, 32).Center().Children(func() {
