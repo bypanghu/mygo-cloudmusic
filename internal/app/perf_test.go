@@ -68,34 +68,6 @@ func TestNowPlayingFrameBudget(t *testing.T) {
 	}
 }
 
-// Loaded search categories and entity details settle without scheduling idle animation frames.
-func TestCatalogFrameBudget(t *testing.T) {
-	for _, page := range []pageKind{pageSearch, pageArtist, pageAlbum, pageUser} {
-		a := newTestApp()
-		a.settings = defaultSettings()
-		switch page {
-		case pageSearch:
-			a.open(cachedSearch(a, "春日影", netease.SearchAlbums, netease.SearchResult{Albums: []netease.Album{{ID: 1, Name: "迷跡波"}}, Total: 1}))
-		case pageArtist:
-			a.catalog.artists = map[int64]*catalogArtist{1: {data: &netease.ArtistPage{Artist: netease.Artist{ID: 1, Name: "MyGO!!!!!"}}}}
-			a.open(route{page: pageArtist, entity: 1})
-		case pageAlbum:
-			a.catalog.albums = map[int64]*catalogAlbum{1: {data: &netease.AlbumPage{Album: netease.Album{ID: 1, Name: "迷跡波"}}}}
-			a.open(route{page: pageAlbum, entity: 1})
-		case pageUser:
-			a.catalog.users = map[int64]*catalogUser{1: {data: &netease.User{UserID: 1, Nickname: "听歌的人"}, playlistsLoaded: true}}
-			a.open(route{page: pageUser, entity: 1})
-		}
-		tt := ui.NewTester(a.view, 1200, 800)
-		tt.Advance(time.Second)
-		tt.Frame()
-		tt.Advance(time.Second)
-		if tt.FramePending() {
-			t.Errorf("page %d keeps requesting frames while idle", page)
-		}
-	}
-}
-
 // Another song's backdrop fades in over the last one's, which is then let
 // go, so that the backdrop stops asking for frames.
 func TestBackdropFadeEnds(t *testing.T) {

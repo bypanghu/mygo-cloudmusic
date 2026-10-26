@@ -3,6 +3,3 @@
 mygo_windows_*.syso
 /netease-music-mygo
 /node_modules/
-.agents
-.claude
-skills-lock.json

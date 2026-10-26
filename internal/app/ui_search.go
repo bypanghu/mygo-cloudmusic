@@ -2,16 +2,26 @@ package app
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/egoist/mygo/ui"
 
 	"netease-music-mygo/internal/netease"
 )
 
+// searchResults and searchSuggest search NetEase; tests replace them.
+var (
+	searchResults = netease.SearchPage
+	searchSuggest = netease.SearchSuggest
+)
+
+// searchLimit is how many results load at a time.
+const searchLimit = 60
+
+// searchKinds are the kinds of search, as their tabs show them.
 var searchKinds = []struct {
-	kind netease.SearchType
-	name string
-	unit string
+	kind        netease.SearchType
+	label, unit string
 }{
 	{netease.SearchSongs, "单曲", "首单曲"},
 	{netease.SearchArtists, "歌手", "位歌手"},
@@ -20,133 +30,190 @@ var searchKinds = []struct {
 	{netease.SearchPodcasts, "播客", "个播客"},
 }
 
-func (a *app) searchHeader(c *ui.Context) {
-	p, r, e := a.pal, a.route, a.searchEntry()
-	ui.Column(c).Gap(8).Margin(0, 0, 20, 0).Children(func() {
-		ui.Text(c, "搜索「"+r.query+"」").FontSize(28).FontWeight(700).LetterSpacing(-0.5).SingleLine()
-		status := "正在搜索…"
-		if e != nil && !e.loading {
-			for _, k := range searchKinds {
-				if k.kind == r.kind {
-					status = fmt.Sprintf("找到 %d %s", e.result.Total, k.unit)
-				}
+// searchData is what a search found, as far as its pages have loaded.
+type searchData struct {
+	res  netease.SearchResult
+	page paged
+}
+
+// search searches for q, of the kind last searched for.
+func (a *app) search(q string) {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return
+	}
+	kind := a.searched.kind
+	if kind == 0 {
+		kind = netease.SearchSongs
+	}
+	a.searchFor(route{page: pageSearch, query: q, kind: kind})
+}
+
+// searchFor opens the page of a search, remembering its query. Searched
+// for again, it loads anew.
+func (a *app) searchFor(r route) {
+	a.rememberSearch(r.query)
+	a.dismissSuggestions()
+	if r == a.route {
+		a.nowPlaying = false
+		a.loadSearch(r, true)
+		return
+	}
+	a.open(r)
+}
+
+// loadSearch loads the first page of a search, unless it has, or again.
+func (a *app) loadSearch(r route, again bool) {
+	if a.searches[r] != nil && !again {
+		return
+	}
+	d := &searchData{}
+	a.searches[r] = d
+	a.moreResults(r, d)
+}
+
+// moreResults loads the next page of a search. A search done again has
+// new data, so the last one's pages land where nothing shows them.
+func (a *app) moreResults(r route, d *searchData) {
+	if d.page.loading {
+		return
+	}
+	d.page.loading, d.page.err = true, ""
+	offset := d.res.Len()
+	go func() {
+		res, err := searchResults(r.query, r.kind, searchLimit, offset)
+		a.post(func() {
+			d.page.loading = false
+			if err != nil {
+				d.page.err = "搜索失败，请稍后再试"
+				return
 			}
-			if e.err != "" {
-				status = "暂时无法获取搜索结果"
-			}
-		}
-		ui.Text(c, status).FontSize(13).TextColor(p.muted)
-		ui.Row(c).Gap(6).AlignItems(ui.Center).Margin(10, 0, 0, 0).Children(func() {
-			for _, k := range searchKinds {
-				selected := k.kind == r.kind
-				b := ui.ButtonBase(c.Key(k.kind)).Height(36).PaddingX(16).Radius(8).Center().Label(k.name)
-				fg, bg := p.muted, ui.Transparent
-				if selected {
-					fg, bg = p.accent, p.accent.Alpha(0.08)
-				} else if b.Hovered() {
-					fg, bg = p.text, p.hover
-				}
-				b.Background(bg).OnClick(func() { a.chooseSearch(k.kind) }).Children(func() {
-					ui.Text(c, k.name).FontSize(14).FontWeight(600).TextColor(fg)
-				})
-			}
-			ui.Spacer(c)
-			iconButton(c.Key("refresh"), iconReload, 16, p.muted, "刷新搜索").
-				Disabled(e != nil && e.loading).OnClick(func() { a.loadSearch(r, true, false) })
+			d.res.Append(res)
+			// A server can claim more while sending none.
+			d.page.loaded, d.page.more = true, res.Len() > 0 && d.res.Len() < d.res.Total
 		})
-	})
+	}()
+}
+
+// searchHistoryLimit is how many searches the history keeps.
+const searchHistoryLimit = 20
+
+// rememberSearch puts q first in the history of searches, once.
+func (a *app) rememberSearch(q string) {
+	history := []string{q}
+	for _, s := range a.settings.SearchHistory {
+		if s != q && len(history) < searchHistoryLimit {
+			history = append(history, s)
+		}
+	}
+	a.settings.SearchHistory = history
+	a.settings.save()
+}
+
+func (a *app) clearSearchHistory() {
+	a.settings.SearchHistory = nil
+	a.settings.save()
 }
 
 func (a *app) searchPage(c *ui.Context) {
-	e := a.searchEntry()
-	if e == nil {
-		return
-	}
-	header := func(c *ui.Context) {
-		ui.Column(c).PaddingX(12).Children(func() { a.searchHeader(c) })
-	}
-	count := searchCount(e.result, a.route.kind)
-	if a.route.kind == netease.SearchSongs {
-		if e.loading && count == 0 {
+	r := a.route
+	d := a.searches[r]
+	header := func(c *ui.Context) { a.searchHeader(c, d) }
+	more := func() { a.moreResults(r, d) }
+	if r.kind == netease.SearchSongs {
+		if !d.page.loaded && d.page.loading {
 			a.trackSkeleton(c, a.pageShimmer(c), true, header)
 			return
 		}
-		if count > 0 {
-			a.trackRows(c, e.result.Songs, true, header, a.searchFooter)
-			return
-		}
+		a.trackRows(c, d.res.Songs, true, header, func(c *ui.Context) {
+			a.pageFoot(c, &d.page, more)
+			a.searchEmpty(c, d)
+		})
+		return
 	}
-	top, bottom := a.insets(c)
-	ui.Scroll(c.Key(a.route)).TrackScroll(&a.pageScroll).Grow(1).
-		Padding(top+pageGap, pagePad, bottom+32, pagePad).ScrollbarInsets(top, 0, bottom, 0).Children(func() {
-		a.startMark(c)
-		defer a.endMark(c)
-		a.searchHeader(c)
-		if count == 0 {
-			switch {
-			case e.loading:
-				s := a.pageShimmer(c)
-				a.playlistCardsSkeleton(c, s, a.columns(c, 156)*2, 156, true)
-			case e.err != "":
-				ui.Column(c).PaddingY(40).Gap(14).AlignItems(ui.Start).Children(func() {
-					ui.Text(c, e.err).FontSize(14).TextColor(a.pal.muted)
-					r := a.route
-					ui.Button(c, "重试").OnClick(func() { a.loadSearch(r, true, false) })
-				})
-			default:
-				ui.Column(c).PaddingY(40).Gap(8).Children(func() {
-					ui.Text(c, "没有找到相关结果").FontSize(17).FontWeight(600)
-					ui.Text(c, "试试其他关键词，或切换搜索分类").FontSize(14).TextColor(a.pal.muted)
-				})
-			}
-			return
-		}
-		switch a.route.kind {
+	a.scrollPage(c, func() {
+		header(c)
+		res := &d.res
+		switch r.kind {
 		case netease.SearchArtists:
 			ui.Grid(c).Columns(a.columns(c, 132)).GapX(20).GapY(28).Children(func() {
-				for i := range e.result.Artists {
-					a.artistCard(c.Key(e.result.Artists[i].ID), &e.result.Artists[i])
+				for i := range res.Artists {
+					a.artistCard(c.Key(res.Artists[i].ID), &res.Artists[i])
 				}
 			})
 		case netease.SearchAlbums:
-			ui.Grid(c).Columns(a.columns(c, 156)).GapX(20).GapY(28).Children(func() {
-				for i := range e.result.Albums {
-					a.albumCard(c.Key(e.result.Albums[i].ID), &e.result.Albums[i])
-				}
-			})
+			a.albumGrid(c, res.Albums)
 		case netease.SearchUsers:
-			ui.Column(c).Gap(4).Children(func() {
-				for i := range e.result.Users {
-					a.userRow(c.Key(e.result.Users[i].UserID), &e.result.Users[i])
-				}
-			})
+			for i := range res.Users {
+				a.userRow(c.Key(res.Users[i].UserID), &res.Users[i])
+			}
 		case netease.SearchPodcasts:
-			ui.Column(c).Gap(6).Children(func() {
-				for i := range e.result.Podcasts {
-					a.podcastRow(c.Key(e.result.Podcasts[i].ID), &e.result.Podcasts[i])
-				}
-			})
+			for i := range res.Podcasts {
+				a.podcastRow(c.Key(res.Podcasts[i].ID), &res.Podcasts[i])
+			}
 		}
-		a.searchFooter(c)
+		if !d.page.loaded && d.page.loading {
+			a.playlistCardsSkeleton(c, a.pageShimmer(c), a.columns(c, 156), 156, false)
+			return
+		}
+		a.pageFoot(c, &d.page, more)
+		a.searchEmpty(c, d)
 	})
 }
 
-func (a *app) searchFooter(c *ui.Context) {
-	e, r := a.searchEntry(), a.route
-	if e == nil {
-		return
+func (a *app) searchEmpty(c *ui.Context, d *searchData) {
+	if d.page.loaded && d.res.Len() == 0 {
+		a.empty(c, "没有找到相关结果")
 	}
-	ui.Column(c).Gap(12).PaddingY(24).AlignItems(ui.Center).Children(func() {
-		ui.Textf(c, "已显示 %d / %d", searchCount(e.result, r.kind), e.result.Total).
-			FontSize(12).FontFeatures("tnum").TextColor(a.pal.muted)
-		switch {
-		case e.loading:
-			ui.Text(c, "正在加载…").FontSize(13).TextColor(a.pal.muted)
-		case e.err != "":
-			ui.Text(c, e.err).FontSize(13).TextColor(a.pal.muted)
-			ui.Button(c, "重试加载").OnClick(func() { a.loadSearch(r, false, true) })
-		case e.result.More:
-			ui.Button(c, "加载更多").OnClick(func() { a.loadSearch(r, false, true) })
+}
+
+// searchHeader is what was searched for, how many it found, and the tabs
+// of what it may look for instead.
+func (a *app) searchHeader(c *ui.Context, d *searchData) {
+	r := a.route
+	sub := "搜索"
+	at := 0
+	for i, k := range searchKinds {
+		if k.kind == r.kind {
+			at = i
+			if d.page.loaded {
+				sub = fmt.Sprintf("搜索 · 找到 %d %s", d.res.Total, k.unit)
+			}
+		}
+	}
+	a.heading(c, "“"+r.query+"”", sub)
+	ui.Row(c).Margin(0, 0, 18, 0).Children(func() {
+		labels := make([]string, len(searchKinds))
+		for i, k := range searchKinds {
+			labels[i] = k.label
+		}
+		if segmented(c.Key("kind"), &at, labels...) {
+			r.kind = searchKinds[at].kind
+			a.show(r)
 		}
 	})
+}
+
+// artistCard is an artist's round photo over their name, opening their page.
+func (a *app) artistCard(c *ui.Context, ar *netease.ArtistProfile) {
+	p := a.pal
+	card := ui.ButtonBase(c).Column().Gap(10).AlignItems(ui.Stretch).FocusRing(false).Label(ar.Name)
+	hovered := card.Hovered()
+	card.Children(func() {
+		photo := ar.Avatar
+		if photo == "" {
+			photo = ar.PicURL
+		}
+		art := ui.Box(c).AspectRatio(1).Radius(999)
+		if hovered {
+			art.Shadow(0, 12, 28, -6, p.cardShade)
+		} else {
+			art.Shadow(0, 2, 8, -2, p.cardShade)
+		}
+		art.Children(func() { a.coverFill(c, photo, 400, 999) })
+		ui.Text(c, ar.Name).FontSize(13).FontWeight(500).SingleLine().AlignSelf(ui.Center)
+	})
+	if card.Clicked() {
+		a.open(route{page: pageArtist, id: ar.ID})
+	}
 }

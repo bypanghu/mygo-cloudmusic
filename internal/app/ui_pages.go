@@ -156,7 +156,7 @@ func (a *app) playlistCard(c *ui.Context, pl *netease.Playlist) {
 		}
 	})
 	if card.Clicked() {
-		a.open(route{page: pagePlaylist, playlist: pl.ID})
+		a.open(route{page: pagePlaylist, id: pl.ID})
 	}
 }
 
@@ -223,12 +223,12 @@ func (a *app) chartCard(c *ui.Context, pl *netease.Playlist) {
 		})
 	})
 	if card.Clicked() {
-		a.open(route{page: pagePlaylist, playlist: pl.ID})
+		a.open(route{page: pagePlaylist, id: pl.ID})
 	}
 }
 
 func (a *app) playlistPage(c *ui.Context) {
-	id := a.route.playlist
+	id := a.route.id
 	pl := a.playlists[id]
 	if pl == nil {
 		if !a.loadingPl[id] {
@@ -320,10 +320,11 @@ func (a *app) trackRows(c *ui.Context, tracks []netease.Track, covers bool, head
 	// A song's menu can take it out of the playlist it is listed in.
 	var pid int64
 	if a.route.page == pagePlaylist {
-		pid = a.route.playlist
+		pid = a.route.id
 	}
 	w, _ := c.Size()
-	wide := w-sidebarWidth > 820
+	// An album's page has no column of the album its songs are on.
+	wide := w-sidebarWidth > 820 && a.route.page != pageAlbum
 	top, bottom := a.insets(c)
 	// Rows out of view are not built, their marks with them: a list
 	// scrolled away from its start or end has content under the bars.
@@ -389,18 +390,20 @@ func (a *app) trackRows(c *ui.Context, tracks []netease.Track, covers bool, head
 					if !tr.Playable() {
 						ui.Text(c, "VIP").FontSize(9).FontWeight(800).TextColor(p.accent).Padding(0, 4).Radius(3).Border(1, p.accent.Alpha(0.6))
 					}
-					a.artistLinks(c, tr.Artists)
+					a.artistLinks(c, tr, p.muted, p.text).FontSize(12.5).SingleLine().Shrink(1).MinWidth(0)
 					if tr.Reason != "" {
 						ui.Text(c, tr.Reason).FontSize(10.5).FontWeight(600).TextColor(p.accent).Padding(1, 6).Radius(999).Background(p.accent.Alpha(0.1)).SingleLine()
 					}
 				})
 			})
 			if wide {
-				id := tr.Album.ID
-				ui.ButtonBase(c.Key("album")).Grow(2).Basis(0).MinWidth(0).Justify(ui.Start).
-					Label("查看专辑：" + tr.Album.Name).Disabled(id <= 0).
-					OnClick(func() { a.open(route{page: pageAlbum, entity: id}) }).Children(func() {
-					ui.Text(c, tr.Album.Name).FontSize(12.5).TextColor(p.muted).SingleLine().Shrink(1).MinWidth(0)
+				album := ui.RichText(c).Grow(2).Basis(0).MinWidth(0).FontSize(12.5).TextColor(p.muted).SingleLine()
+				album.Children(func() {
+					if tr.Album.ID == 0 {
+						ui.Text(c, tr.Album.Name)
+					} else {
+						a.link(c.Key("album"), tr.Album.Name, p.muted, p.text, route{page: pageAlbum, id: tr.Album.ID})
+					}
 				})
 			}
 			// A liked song's heart shows; the others' as the pointer is on them.

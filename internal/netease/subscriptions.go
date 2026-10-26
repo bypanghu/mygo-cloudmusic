@@ -5,25 +5,22 @@ import (
 	"strconv"
 )
 
-// SubscribePodcast subscribes to a channel, or removes its subscription.
+// SubscribePodcast subscribes the listener to a podcast, or unsubscribes
+// them.
 func SubscribePodcast(id int64, subscribe bool) error {
-	return setSubscription("djradio", subscribe, map[string]any{"id": strconv.FormatInt(id, 10)})
+	return subscription("djradio", subscribe, map[string]any{"id": strconv.FormatInt(id, 10)})
 }
 
-// FollowArtist saves an artist, not the artist's separate user account.
+// FollowArtist follows an artist for the listener, or unfollows them.
 func FollowArtist(id int64, follow bool) error {
-	return setSubscription("artist", follow, map[string]any{
-		"artistId":  strconv.FormatInt(id, 10),
-		"artistIds": fmt.Sprintf("[%d]", id),
-	})
+	return subscription("artist", follow, map[string]any{"artistId": strconv.FormatInt(id, 10), "artistIds": fmt.Sprintf("[%d]", id)})
 }
 
-func setSubscription(kind string, subscribe bool, data map[string]any) error {
-	op := "unsub"
-	if subscribe {
-		op = "sub"
+func subscription(kind string, sub bool, data map[string]any) error {
+	path := "/api/" + kind + "/unsub"
+	if sub {
+		path = "/api/" + kind + "/sub"
 	}
-	path := "/api/" + kind + "/" + op
 	var res struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`

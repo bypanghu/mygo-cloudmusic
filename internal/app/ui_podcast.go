@@ -10,149 +10,271 @@ import (
 	"netease-music-mygo/internal/netease"
 )
 
-func (a *app) podcastRow(c *ui.Context, podcast *netease.Podcast) {
-	id := podcast.ID
-	row := ui.ButtonBase(c).Gap(16).Padding(12).Radius(10).AlignItems(ui.Center).Label(podcast.Name).
-		OnClick(func() { a.open(route{page: pagePodcast, entity: id}) })
-	if row.Hovered() {
-		row.Background(a.pal.hover)
-	}
-	row.Children(func() {
-		a.cover(c, podcast.PicURL, 180, 72, 8)
-		ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(5).Children(func() {
-			ui.Text(c, podcast.Name).FontSize(15).FontWeight(600).SingleLine()
-			var meta []string
-			if podcast.DJ.Nickname != "" {
-				meta = append(meta, podcast.DJ.Nickname)
-			}
-			if podcast.Category != "" {
-				meta = append(meta, podcast.Category)
-			}
-			meta = append(meta, fmt.Sprintf("%d 期节目", podcast.ProgramCount))
-			ui.Text(c, strings.Join(meta, " · ")).FontSize(12.5).TextColor(a.pal.muted).SingleLine()
-			if podcast.Description != "" {
-				ui.Text(c, podcast.Description).FontSize(12.5).TextColor(a.pal.muted).SingleLine()
-			}
-		})
-		ui.Icon(c, iconForward).Size(16, 16).TextColor(a.pal.muted)
-	})
+// These load a podcast and its episodes from NetEase, and subscribe to it;
+// tests replace them.
+var (
+	podcastDetail    = netease.PodcastDetail
+	podcastPrograms  = netease.PodcastPrograms
+	subscribePodcast = netease.SubscribePodcast
+)
+
+// programsPage is how many of a podcast's episodes load at a time.
+const programsPage = 30
+
+// podcastData is what the app has of a podcast: what it is, and its
+// episodes, the newest first, as far as they have loaded.
+type podcastData struct {
+	podcast     *netease.Podcast
+	loading     bool
+	err         string
+	programs    []netease.Program
+	page        paged
+	subscribing bool // a subscription or its end is on its way
 }
 
-func (a *app) programPane(c *ui.Context, tr *netease.Track) {
-	ui.Scroll(c.Key(tr.ProgramID)).Grow(1).Padding(8, 12, 32, 0).Gap(16).Children(func() {
-		ui.Text(c, tr.Name).FontSize(24).FontWeight(700).MaxLines(3)
-		text := strings.TrimSpace(tr.Description)
-		if text == "" {
-			text = "暂无节目简介"
+func (a *app) loadPodcast(id int64) {
+	d := a.podcasts[id]
+	if d == nil {
+		d = &podcastData{}
+		a.podcasts[id] = d
+	}
+	if !d.page.loaded {
+		a.loadPrograms(id)
+	}
+	if d.podcast != nil || d.loading {
+		return
+	}
+	d.loading, d.err = true, ""
+	go func() {
+		pod, err := podcastDetail(id)
+		a.post(func() {
+			d.loading = false
+			if err != nil {
+				d.err = "播客加载失败"
+				return
+			}
+			d.podcast = pod
+		})
+	}()
+}
+
+// loadPrograms loads the next page of a podcast's episodes.
+func (a *app) loadPrograms(id int64) {
+	d := a.podcasts[id]
+	if d.page.loading {
+		return
+	}
+	d.page.loading, d.page.err = true, ""
+	offset := len(d.programs)
+	go func() {
+		programs, more, err := podcastPrograms(id, programsPage, offset)
+		a.post(func() {
+			d.page.loading = false
+			if err != nil {
+				d.page.err = "节目加载失败"
+				return
+			}
+			d.programs = append(d.programs, programs...)
+			d.page.loaded, d.page.more = true, more && len(programs) > 0
+		})
+	}()
+}
+
+// playProgram plays the episodes loaded, from the one at i: those with
+// audio to play.
+func (a *app) playProgram(d *podcastData, i int) {
+	var queue []netease.Track
+	at := 0
+	for j := range d.programs {
+		if d.programs[j].MainSong.ID == 0 {
+			continue
 		}
-		ui.Text(c, text).FontSize(15).LineHeight(1.6).TextColor(white.Alpha(0.75))
-		if tr.PodcastID > 0 {
-			id := tr.PodcastID
-			pillButton(c, iconRadio, "查看播客", white.Alpha(0.12), white).OnClick(func() {
-				a.nowPlaying = false
-				a.open(route{page: pagePodcast, entity: id})
-			})
+		if j <= i {
+			at = len(queue)
 		}
-	})
+		queue = append(queue, d.programs[j].Track(d.podcast))
+	}
+	if len(queue) > 0 {
+		a.pl.PlayQueue(queue, at)
+	}
+}
+
+// toggleSubscribe subscribes the listener to a podcast, or unsubscribes
+// them, at once, going back if NetEase refuses. Signed out, it asks the
+// listener to sign in.
+func (a *app) toggleSubscribe(d *podcastData) {
+	if d.podcast == nil || d.subscribing {
+		return
+	}
+	if a.profile == nil {
+		a.openLogin()
+		return
+	}
+	pod := d.podcast
+	sub := !pod.Subed
+	pod.Subed, d.subscribing = sub, true
+	if sub {
+		pod.SubCount++
+	} else {
+		pod.SubCount--
+	}
+	go func() {
+		err := subscribePodcast(pod.ID, sub)
+		a.post(func() {
+			d.subscribing = false
+			switch {
+			case err != nil:
+				pod.Subed = !sub
+				if sub {
+					pod.SubCount--
+				} else {
+					pod.SubCount++
+				}
+				a.toast = "操作失败，请稍后再试"
+			case sub:
+				a.toast = "已订阅"
+			default:
+				a.toast = "已取消订阅"
+			}
+		})
+	}()
 }
 
 func (a *app) podcastPage(c *ui.Context) {
-	id := a.route.entity
-	s := a.catalog.podcasts[id]
-	if s == nil || s.data == nil {
-		message, loading := "播客不可用", false
-		if s != nil {
-			message, loading = s.err, s.loading
+	p := a.pal
+	id := a.route.id
+	d := a.podcasts[id]
+	if d.podcast == nil {
+		if !d.loading {
+			a.centered(c, d.err, func() { a.loadPodcast(id) })
+			return
 		}
-		a.entityStatus(c, message, loading, func() { a.loadPodcast(id) })
+		s := a.pageShimmer(c)
+		a.trackSkeleton(c, s, true, func(c *ui.Context) { a.playlistHeaderSkeleton(c, s) })
 		return
 	}
-	a.entityScroll(c, func() {
-		podcast := s.data
-		ui.Row(c).Gap(24).AlignItems(ui.Center).Children(func() {
-			a.cover(c, podcast.PicURL, 400, 144, 8)
+	pod := d.podcast
+	cur := a.pl.Current()
+	a.scrollPage(c, func() {
+		ui.Row(c).Gap(28).AlignItems(ui.End).Padding(0, 0, 8, 0).Children(func() {
+			ui.Box(c).Size(212, 212).Radius(14).Shadow(0, 18, 40, -10, p.cardShade).Children(func() {
+				a.coverFill(c, pod.PicURL, 600, 14)
+			})
 			ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(8).Children(func() {
-				ui.Text(c, podcast.Name).FontSize(28).FontWeight(700).MaxLines(2)
-				if podcast.DJ.Nickname != "" {
-					uid := podcast.DJ.UserID
-					ui.ButtonBase(c).Label("主播：" + podcast.DJ.Nickname).Disabled(uid <= 0).
-						OnClick(func() { a.open(route{page: pageUser, entity: uid}) }).Children(func() {
-						ui.Text(c, podcast.DJ.Nickname).FontSize(14).TextColor(a.pal.muted)
-					})
+				kind := "播客"
+				if pod.Category != "" {
+					kind += " · " + pod.Category
 				}
-				ui.Textf(c, "%d 期节目 · %s 人订阅", podcast.ProgramCount, count(int(podcast.SubCount))).FontSize(13).TextColor(a.pal.muted)
-				ui.Row(c).Gap(10).Children(func() {
-					pillButton(c.Key("play-podcast"), iconPlay, "播放节目", a.pal.accent, a.pal.onAccent).
-						Disabled(len(s.programs) == 0).OnClick(func() {
-						if len(s.programs) > 0 {
-							a.playPodcastProgram(id, s.programs[0].ID)
-						}
-					})
-					label, action, icon := "订阅播客", "订阅播客", iconPlus
-					if podcast.Subed {
-						label, action, icon = "已订阅", "取消订阅播客", iconCheck
+				ui.Text(c, kind).FontSize(12).FontWeight(600).TextColor(p.accent)
+				ui.Text(c, pod.Name).FontSize(30).FontWeight(800).LetterSpacing(-0.6).MaxLines(2).LineHeight(1.2)
+				ui.RichText(c).FontSize(13).TextColor(p.muted).Children(func() {
+					if pod.DJ.UserID != 0 {
+						a.link(c.Key("dj"), pod.DJ.Nickname, p.muted, p.text, route{page: pageUser, id: pod.DJ.UserID})
+						ui.Text(c, " · ")
 					}
-					pillButton(c.Key("subscribe-podcast"), icon, label, a.pal.hover, a.pal.text).
-						Label(action).Disabled(s.subscribing).OnClick(func() { a.togglePodcastSubscription(id) })
+					ui.Text(c, fmt.Sprintf("%d 期 · %s 人订阅", pod.ProgramCount, count(int(pod.SubCount))))
+				})
+				if desc := strings.TrimSpace(pod.Description); desc != "" {
+					ui.Text(c, strings.ReplaceAll(desc, "\n", " ")).FontSize(12.5).TextColor(p.muted).MaxLines(2).LineHeight(1.45).Margin(2, 0, 0, 0)
+				}
+				ui.Row(c).Gap(10).Margin(10, 0, 0, 0).Children(func() {
+					if pillButton(c.Key("play"), iconPlay, "播放", p.accent, p.onAccent).Clicked() {
+						a.playProgram(d, 0)
+					}
+					icon, label := iconPlus, "订阅"
+					if pod.Subed {
+						icon, label = iconCheck, "已订阅"
+					}
+					if pillButton(c.Key("subscribe"), icon, label, p.hover.Over(p.bg), p.text).Clicked() {
+						a.toggleSubscribe(d)
+					}
 				})
 			})
 		})
-		if desc := strings.TrimSpace(podcast.Description); desc != "" {
-			ui.Text(c, desc).FontSize(14).LineHeight(1.5).Margin(20, 0, 0, 0)
-		}
 		a.section(c, "节目")
-		if s.playErr != "" {
-			ui.Text(c, s.playErr).FontSize(13).TextColor(a.pal.accent).Margin(0, 0, 12, 0)
+		for i := range d.programs {
+			a.programRow(c.Key(d.programs[i].ID), d, i, cur)
 		}
-		for _, program := range s.programs {
-			pid := program.ID
-			current := a.pl.Current()
-			playing := current != nil && current.ProgramID == pid
-			row := ui.ButtonBase(c.Key(pid)).Gap(14).Padding(10).Radius(8).AlignItems(ui.Center).
-				Label("播放节目：" + program.Name).Disabled(s.resolving[pid]).OnClick(func() {
-				a.playPodcastProgram(id, pid)
-			})
+		a.pageFoot(c, &d.page, func() { a.loadPrograms(id) })
+		if d.page.loaded && len(d.programs) == 0 {
+			a.empty(c, "暂无节目")
+		}
+	})
+}
+
+// programRow is an episode in its podcast's list, which a click plays.
+func (a *app) programRow(c *ui.Context, d *podcastData, i int, cur *netease.Track) {
+	p := a.pal
+	pr := &d.programs[i]
+	playing := cur != nil && cur.ProgramID == pr.ID
+	row := ui.ButtonBase(c).Height(60).PaddingX(12).Gap(14).Radius(8).AlignItems(ui.Center).FocusRing(false).
+		Label(pr.Name).Disabled(pr.MainSong.ID == 0)
+	switch {
+	case playing:
+		row.Background(p.accent.Alpha(0.08))
+	case row.Hovered():
+		row.Background(p.hover)
+	}
+	row.Children(func() {
+		cover := pr.CoverURL
+		if cover == "" {
+			cover = d.podcast.PicURL
+		}
+		a.cover(c, cover, 96, 40, 6)
+		ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(3).Children(func() {
+			title := ui.Text(c, pr.Name).FontSize(13.5).FontWeight(500).SingleLine()
 			if playing {
-				row.Background(a.pal.accent.Alpha(0.08))
-			} else if row.Hovered() {
-				row.Background(a.pal.hover)
+				title.TextColor(p.accent)
 			}
-			row.Children(func() {
-				cover := program.CoverURL
-				if cover == "" {
-					cover = podcast.PicURL
-				}
-				a.cover(c, cover, 120, 48, 6)
-				ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(4).Children(func() {
-					ui.Text(c, program.Name).FontSize(14).FontWeight(500).SingleLine()
-					if program.CreateTime > 0 {
-						ui.Text(c, time.UnixMilli(program.CreateTime).Format("2006-01-02")).FontSize(12).TextColor(a.pal.muted)
-					}
-				})
-				if s.resolving[pid] {
-					ui.Text(c, "正在加载…").FontSize(12).TextColor(a.pal.muted)
-				} else {
-					ui.Text(c, clock(time.Duration(program.Duration)*time.Millisecond)).FontSize(12).FontFeatures("tnum").TextColor(a.pal.muted)
-				}
-				if playing {
-					a.nowPlayingBars(c)
-				} else {
-					ui.Icon(c, iconPlay).Size(14, 14).TextColor(a.pal.muted)
-				}
-			})
+			ui.Text(c, time.UnixMilli(pr.CreateTime).Format("2006-01-02")).FontSize(12).TextColor(p.muted)
+		})
+		if playing {
+			a.nowPlayingBars(c)
 		}
-		ui.Column(c).Gap(12).PaddingY(20).AlignItems(ui.Start).Children(func() {
-			switch {
-			case s.programsLoading:
-				ui.Text(c, "正在加载节目…").FontSize(13).TextColor(a.pal.muted)
-			case s.programsErr != "":
-				ui.Text(c, s.programsErr).FontSize(13).TextColor(a.pal.muted)
-				ui.Button(c, "重试加载节目").OnClick(func() { a.loadPodcastEpisodes(id) })
-			case s.more:
-				ui.Button(c, "加载更多节目").OnClick(func() { a.loadPodcastEpisodes(id) })
-			case len(s.programs) == 0:
-				ui.Text(c, "暂无节目").FontSize(13).TextColor(a.pal.muted)
+		ui.Text(c, clock(time.Duration(pr.Duration)*time.Millisecond)).FontSize(12).FontFeatures("tnum").TextColor(p.muted)
+	})
+	if row.Clicked() {
+		a.playProgram(d, i)
+	}
+}
+
+// podcastRow is a podcast in a list, opening its page.
+func (a *app) podcastRow(c *ui.Context, pod *netease.Podcast) {
+	p := a.pal
+	row := ui.ButtonBase(c).Padding(10, 12).Gap(14).Radius(10).AlignItems(ui.Center).FocusRing(false).Label(pod.Name)
+	if row.Hovered() {
+		row.Background(p.hover)
+	}
+	row.Children(func() {
+		a.cover(c, pod.PicURL, 160, 64, 8)
+		ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(4).Children(func() {
+			ui.Text(c, pod.Name).FontSize(14).FontWeight(600).SingleLine()
+			meta := []string{fmt.Sprintf("%d 期", pod.ProgramCount)}
+			if pod.DJ.Nickname != "" {
+				meta = append([]string{pod.DJ.Nickname}, meta...)
+			}
+			ui.Text(c, strings.Join(meta, " · ")).FontSize(12.5).TextColor(p.muted).SingleLine()
+			if pod.Description != "" {
+				ui.Text(c, pod.Description).FontSize(12.5).TextColor(p.muted).SingleLine()
 			}
 		})
+	})
+	if row.Clicked() {
+		a.open(route{page: pagePodcast, id: pod.ID})
+	}
+}
+
+// programPane is what the episode playing is about, in Now Playing, in
+// place of a song's lyrics.
+func (a *app) programPane(c *ui.Context, tr *netease.Track) {
+	ui.Scroll(c.Key(tr.ProgramID)).Grow(1).Padding(4, 12, 48, 0).Gap(16).Children(func() {
+		desc := strings.TrimSpace(tr.Description)
+		if desc == "" {
+			desc = "这期节目没有简介"
+		}
+		ui.Text(c, desc).FontSize(15).LineHeight(1.7).TextColor(white.Alpha(0.75))
+		if tr.PodcastID != 0 && pillButton(c.Key("podcast"), iconRadio, "查看播客", white.Alpha(0.14), white).AlignSelf(ui.Start).Clicked() {
+			a.openPage(route{page: pagePodcast, id: tr.PodcastID})
+		}
 	})
 }

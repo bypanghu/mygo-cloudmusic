@@ -1,18 +1,12 @@
 package app
 
 import (
+	"runtime"
 	"time"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 )
-
-var showSettings = (*app).openSettings
-
-func (a *app) settingsButton(c *ui.Context, color ui.Color) {
-	iconButton(c.Key("settings"), iconSettings, 18, color, "设置").
-		Tooltip("设置").OnClick(func() { showSettings(a) })
-}
 
 // openSettings shows the settings window, opening it the first time.
 func (a *app) openSettings() {
@@ -38,7 +32,11 @@ func (a *app) openSettings() {
 		BackgroundColor: "light-dark(#f4f4f6, #1c1c1f)",
 		Content:         ui.View(a.settingsView),
 	})
-	a.settingsWin.OnClosed(func() { a.settingsWin = nil })
+	a.settingsWin.OnClosed(func() {
+		a.settingsWin = nil
+		a.syncDock()
+	})
+	a.syncDock()
 }
 
 // changed applies the settings everywhere and keeps them.
@@ -74,6 +72,32 @@ func (a *app) settingsView(c *ui.Context) {
 					}
 				})
 				control()
+			})
+		}
+
+		// Only on macOS: elsewhere the icon is always in the notification
+		// area.
+		if runtime.GOOS == "darwin" {
+			group("通用", func() {
+				row("应用图标", "显示在菜单栏时，关闭窗口后可从菜单栏图标打开", func() {
+					labels := make([]string, len(appIcons))
+					chosen := appIcons[0].label
+					for i, ic := range appIcons {
+						labels[i] = ic.label
+						if ic.id == s.AppIcon {
+							chosen = ic.label
+						}
+					}
+					if ui.Select(c.Key("app-icon"), &chosen, labels).Label("应用图标").Width(150).Changed() {
+						for _, ic := range appIcons {
+							if ic.label == chosen {
+								s.AppIcon = ic.id
+							}
+						}
+						a.changed()
+						a.changeAppIcon()
+					}
+				})
 			})
 		}
 

@@ -571,7 +571,7 @@ func (p *Player) loadSkipping(at, skipped int, play bool, from time.Duration) {
 	p.track = &t
 	p.loading, p.playing, p.err = true, play, ""
 	p.awaiting = false
-	p.lyrics, p.lyricsLoaded = nil, t.ProgramID > 0
+	p.lyrics, p.lyricsLoaded = nil, false
 	p.pending = from
 	p.announce(&t, nil)
 	p.refill()
@@ -587,21 +587,19 @@ func (p *Player) loadSkipping(at, skipped int, play bool, from time.Duration) {
 		}
 	}()
 
-	if t.ProgramID == 0 {
-		go func() {
-			lrc, trans, yrc, err := netease.Lyrics(t.ID)
-			var lines []lyrics.Line
-			if err == nil {
-				lines = lyrics.Build(lrc, trans, yrc)
+	go func() {
+		lrc, trans, yrc, err := netease.Lyrics(t.ID)
+		var lines []lyrics.Line
+		if err == nil {
+			lines = lyrics.Build(lrc, trans, yrc)
+		}
+		p.post(func() {
+			if gen == p.gen {
+				p.lyrics = lines
+				p.lyricsLoaded = true
 			}
-			p.post(func() {
-				if gen == p.gen {
-					p.lyrics = lines
-					p.lyricsLoaded = true
-				}
-			})
-		}()
-	}
+		})
+	}()
 	go func() {
 		level := "exhigh"
 		if p.Quality != nil {
@@ -618,11 +616,12 @@ func (p *Player) loadSkipping(at, skipped int, play bool, from time.Duration) {
 			p.loading = false
 			if err != nil {
 				p.err = err.Error()
-				if err == netease.ErrUnavailable {
+				switch {
+				case err != netease.ErrUnavailable:
+				case t.ProgramID != 0:
+					p.err = "这期节目需要购买才能收听"
+				default:
 					p.err = "这首歌需要 VIP 才能播放"
-					if t.ProgramID > 0 {
-						p.err = "此节目暂不可播放，请检查登录或购买权限"
-					}
 				}
 				// Skip what cannot play, unless nothing in the queue can.
 				if skipped+1 < len(p.order) {

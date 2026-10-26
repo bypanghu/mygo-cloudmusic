@@ -1,11 +1,11 @@
 package netease
 
 import (
-	"fmt"
 	"net/url"
 	"strconv"
 )
 
+// SearchType is what a search looks for.
 type SearchType int
 
 const (
@@ -16,36 +16,36 @@ const (
 	SearchPodcasts SearchType = 1009
 )
 
+// SearchResult is a page of what a search found, of the one type it
+// looked for, and how many it found in all.
 type SearchResult struct {
 	Songs    []Track
-	Albums   []Album
-	Artists  []Artist
+	Albums   []AlbumProfile
+	Artists  []ArtistProfile
 	Users    []User
 	Podcasts []Podcast
 	Total    int
-	More     bool
 }
 
-// SearchPage returns one page of the requested kind of search result.
+// Len is how many the page has.
+func (r *SearchResult) Len() int {
+	return len(r.Songs) + len(r.Albums) + len(r.Artists) + len(r.Users) + len(r.Podcasts)
+}
+
+// SearchPage returns limit of what matches a query, of a type, from offset.
 func SearchPage(query string, kind SearchType, limit, offset int) (SearchResult, error) {
-	switch kind {
-	case SearchSongs, SearchAlbums, SearchArtists, SearchUsers, SearchPodcasts:
-	default:
-		return SearchResult{}, fmt.Errorf("netease: unsupported search type %d", kind)
-	}
 	var res struct {
 		Result struct {
-			Songs        []Track   `json:"songs"`
-			Albums       []Album   `json:"albums"`
-			Artists      []Artist  `json:"artists"`
-			Users        []User    `json:"userprofiles"`
-			Podcasts     []Podcast `json:"djRadios"`
-			PodcastCount int       `json:"djRadiosCount"`
-			SongCount    int       `json:"songCount"`
-			AlbumCount   int       `json:"albumCount"`
-			ArtistCount  int       `json:"artistCount"`
-			UserCount    int       `json:"userprofileCount"`
-			More         *bool     `json:"hasMore"`
+			Songs        []Track         `json:"songs"`
+			SongCount    int             `json:"songCount"`
+			Albums       []AlbumProfile  `json:"albums"`
+			AlbumCount   int             `json:"albumCount"`
+			Artists      []ArtistProfile `json:"artists"`
+			ArtistCount  int             `json:"artistCount"`
+			Users        []User          `json:"userprofiles"`
+			UserCount    int             `json:"userprofileCount"`
+			Podcasts     []Podcast       `json:"djRadios"`
+			PodcastCount int             `json:"djRadiosCount"`
 		} `json:"result"`
 	}
 	q := url.Values{"s": {query}, "type": {strconv.Itoa(int(kind))}, "limit": {strconv.Itoa(limit)}, "offset": {strconv.Itoa(offset)}, "total": {"true"}}
@@ -53,81 +53,74 @@ func SearchPage(query string, kind SearchType, limit, offset int) (SearchResult,
 		return SearchResult{}, err
 	}
 	r := res.Result
-	out := SearchResult{Songs: r.Songs, Albums: r.Albums, Artists: r.Artists, Users: r.Users, Podcasts: r.Podcasts}
-	n := 0
-	switch kind {
-	case SearchSongs:
-		out.Total, n = r.SongCount, len(r.Songs)
-		// Search sometimes marks playable catalogues as taken down; song details are authoritative.
-		detailPrivileges(out.Songs)
-	case SearchAlbums:
-		out.Total, n = r.AlbumCount, len(r.Albums)
-	case SearchArtists:
-		out.Total, n = r.ArtistCount, len(r.Artists)
-	case SearchUsers:
-		out.Total, n = r.UserCount, len(r.Users)
-	case SearchPodcasts:
-		out.Total, n = r.PodcastCount, len(r.Podcasts)
+	// Search marks whole catalogues as taken down that the listener may
+	// play, as YOASOBI's for a subscriber: the songs' details say right.
+	detailPrivileges(r.Songs)
+	return SearchResult{
+		Songs: r.Songs, Albums: r.Albums, Artists: r.Artists, Users: r.Users, Podcasts: r.Podcasts,
+		Total: r.SongCount + r.AlbumCount + r.ArtistCount + r.UserCount + r.PodcastCount,
+	}, nil
+}
+
+// Search returns the songs matching a query.
+func Search(query string, limit int) ([]Track, error) {
+	res, err := SearchPage(query, SearchSongs, limit, 0)
+	return res.Songs, err
+}
+
+// AlbumProfile is an album as its page shows it.
+type AlbumProfile struct {
+	Album
+	Artists     []Artist `json:"artists"`
+	PublishTime int64    `json:"publishTime"` // Unix milliseconds
+	Size        int      `json:"size"`        // how many songs it has
+	Description string   `json:"description"`
+	Songs       []Track  `json:"-"`
+}
+
+// ArtistNames joins the album's artists' names, as its credits read.
+func (al *AlbumProfile) ArtistNames() string {
+	return (&Track{Artists: al.Artists}).ArtistNames()
+}
+
+// AlbumDetail returns an album with its songs.
+func AlbumDetail(id int64) (*AlbumProfile, error) {
+	var res struct {
+		Album AlbumProfile `json:"album"`
+		Songs []Track      `json:"songs"`
 	}
-	out.More = offset+n < out.Total
-	if r.More != nil {
-		out.More = *r.More
-	}
-	return out, nil
-}
-
-type ArtistPage struct {
-	Artist Artist  `json:"artist"`
-	Songs  []Track `json:"hotSongs"`
-}
-
-type AlbumPage struct {
-	Album Album   `json:"album"`
-	Songs []Track `json:"songs"`
-}
-
-// ArtistDetail returns an artist and their popular songs with listener privileges.
-func ArtistDetail(id int64) (*ArtistPage, error) {
-	var res ArtistPage
-	if err := get("/api/artist/"+strconv.FormatInt(id, 10), nil, &res); err != nil {
+	if err := get("/api/v1/album/"+strconv.FormatInt(id, 10), nil, &res); err != nil {
 		return nil, err
 	}
-	detailPrivileges(res.Songs)
-	return &res, nil
+	al := &res.Album
+	al.Songs = res.Songs
+	detailPrivileges(al.Songs)
+	return al, nil
 }
 
-// ArtistAlbums returns one page of an artist's albums.
-func ArtistAlbums(id int64, limit, offset int) ([]Album, error) {
+// ArtistAlbums returns limit of an artist's albums from offset, the newest
+// first, and whether they have more.
+func ArtistAlbums(id int64, limit, offset int) ([]AlbumProfile, bool, error) {
 	var res struct {
-		Albums []Album `json:"hotAlbums"`
+		Albums []AlbumProfile `json:"hotAlbums"`
+		More   bool           `json:"more"`
 	}
 	q := url.Values{"limit": {strconv.Itoa(limit)}, "offset": {strconv.Itoa(offset)}}
 	err := get("/api/artist/albums/"+strconv.FormatInt(id, 10), q, &res)
-	return res.Albums, err
+	return res.Albums, res.More, err
 }
 
-// AlbumDetail returns an album and its songs with listener privileges.
-func AlbumDetail(id int64) (*AlbumPage, error) {
-	var res struct {
-		Album struct {
-			Album
-			Songs []Track `json:"songs"`
-		} `json:"album"`
-		Songs      []Track     `json:"songs"`
-		Privileges []Privilege `json:"privileges"`
-	}
-	if err := get("/api/album/"+strconv.FormatInt(id, 10), nil, &res); err != nil {
-		return nil, err
-	}
-	if res.Songs == nil {
-		res.Songs = res.Album.Songs
-	}
-	withPrivileges(res.Songs, res.Privileges)
-	detailPrivileges(res.Songs)
-	return &AlbumPage{Album: res.Album.Album, Songs: res.Songs}, nil
+// User is someone on NetEase, as their page shows them.
+type User struct {
+	UserID    int64  `json:"userId"`
+	Nickname  string `json:"nickname"`
+	AvatarURL string `json:"avatarUrl"`
+	Signature string `json:"signature"`
+	Followeds int    `json:"followeds"` // their followers
+	Follows   int    `json:"follows"`
 }
 
-// UserDetail returns a user's public profile.
+// UserDetail returns who a user is.
 func UserDetail(id int64) (*User, error) {
 	var res struct {
 		Profile User `json:"profile"`
@@ -136,4 +129,28 @@ func UserDetail(id int64) (*User, error) {
 		return nil, err
 	}
 	return &res.Profile, nil
+}
+
+// legacyTrack is a song in the shape older endpoints still send, as search
+// suggestions, events and podcast episodes do.
+type legacyTrack struct {
+	ID       int64    `json:"id"`
+	Name     string   `json:"name"`
+	Artists  []Artist `json:"artists"`
+	Album    Album    `json:"album"`
+	Duration int64    `json:"duration"`
+}
+
+func (t legacyTrack) track() Track {
+	return Track{ID: t.ID, Name: t.Name, Artists: t.Artists, Album: t.Album, Duration: t.Duration}
+}
+
+// Append adds the next page of a search to r.
+func (r *SearchResult) Append(next SearchResult) {
+	r.Songs = append(r.Songs, next.Songs...)
+	r.Albums = append(r.Albums, next.Albums...)
+	r.Artists = append(r.Artists, next.Artists...)
+	r.Users = append(r.Users, next.Users...)
+	r.Podcasts = append(r.Podcasts, next.Podcasts...)
+	r.Total = next.Total
 }

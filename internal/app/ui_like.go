@@ -34,7 +34,8 @@ func (a *app) loadLiked(uid int64) {
 // NetEase, which may refuse: the heart goes back then. Signed out, it asks
 // the listener to sign in.
 func (a *app) toggleLike(tr *netease.Track) {
-	if tr == nil || tr.ProgramID > 0 {
+	// An episode's audio is no song to like.
+	if tr.ProgramID != 0 {
 		return
 	}
 	if a.profile == nil {
@@ -59,7 +60,7 @@ func (a *app) toggleLike(tr *netease.Track) {
 			for _, pl := range a.mine {
 				if pl.SpecialType == 5 {
 					delete(a.playlists, pl.ID)
-					if a.route.page == pagePlaylist && a.route.playlist == pl.ID {
+					if a.route.page == pagePlaylist && a.route.id == pl.ID {
 						a.loadPlaylist(pl.ID, false)
 					}
 				}
@@ -72,7 +73,7 @@ func (a *app) toggleLike(tr *netease.Track) {
 // (⌘D), which shows no heart: a toast says which it did.
 func (a *app) likeCurrent() {
 	tr := a.pl.Current()
-	if tr == nil || tr.ProgramID > 0 {
+	if tr == nil {
 		return
 	}
 	a.toggleLike(tr)
@@ -98,8 +99,8 @@ func (a *app) setLiked(id int64, like bool) {
 // pops it in on a spring while a ring swells around it and confetti flies
 // out; unliking lets it give a little.
 func (a *app) likeButton(c *ui.Context, tr *netease.Track, size float32, color ui.Color) ui.Element {
-	if tr == nil || tr.ProgramID > 0 {
-		return ui.Box(c).Size(0, 0)
+	if tr.ProgramID != 0 {
+		return ui.Box(c) // an episode has none
 	}
 	liked := a.liked[tr.ID]
 	icon, label := iconHeart, "喜欢"

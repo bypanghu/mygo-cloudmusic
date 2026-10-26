@@ -27,11 +27,12 @@ const (
 )
 
 type route struct {
-	page     pageKind
-	playlist int64
-	entity   int64
-	query    string
-	kind     netease.SearchType
+	page pageKind
+	// id is the playlist, artist, album, user or podcast the page shows.
+	id int64
+	// query and kind are what a search page searched for.
+	query string
+	kind  netease.SearchType
 }
 
 // app is the state both windows show. Everything in it is read and changed
@@ -39,6 +40,7 @@ type route struct {
 type app struct {
 	win   *mygo.Window
 	notch *notch
+	tray  *mygo.Tray // the icon in the menu bar or notification area, while it shows
 	art   *artCache
 	pl    *player.Player
 	pal   palette
@@ -65,27 +67,36 @@ type app struct {
 	charts      []netease.Playlist
 	homeErr     string
 	homeLoading bool
+	homeAt      time.Time // when what the home page shows was asked for
 
 	playlists map[int64]*netease.Playlist
 	loadingPl map[int64]bool
 	plErr     map[int64]string
+	artists   map[int64]*artistData
+	artistTab int // what an artist's page lists: artistHot, artistLatest, artistAlbums or artistEvents
+	albums    map[int64]*albumData
+	users     map[int64]*userData
+	podcasts  map[int64]*podcastData
 	trackList ui.ListState
 	// Where the page and the sidebar are scrolled, kept while Now Playing
 	// covers them, unbuilt.
 	pageScroll ui.ScrollState
 	navScroll  ui.ScrollState
+	scrolled   route // the page trackList and pageScroll are of
 
 	mineCollapsed, savedCollapsed bool
 
-	query     string
-	searchBox ui.Handle
-	searches  searchState
-	catalog   catalogState
+	query       string
+	searchBox   ui.Handle
+	searches    map[route]*searchData // the results of each search, by its page
+	searched    route                 // the search last shown, which the sidebar goes back to
+	suggestions suggestState          // what the search field's query may be after
 
 	nowPlaying  bool
 	npOpen      bool      // Now Playing as it last showed: open or not
 	npChangedAt time.Time // when it last opened or closed
-	npPane      int       // paneLyrics, paneQueue, paneStage or paneComments
+	npPane      int       // paneLyrics, paneQueue, paneStage, paneComments or paneProgram
+	npPaneTop   float32   // how far the cover beside the pane starts below its top
 	lyricScroll ui.ScrollState
 	lyricGlide  lyricGlide
 	lyricAt     int
@@ -153,8 +164,13 @@ var shotHook func(a *app)
 
 func (a *app) showMain() {
 	if a.win != nil {
+		if a.win.IsMinimized() {
+			a.win.Restore()
+		}
 		a.win.Show()
 		a.win.Focus()
+		// From the menu bar alone the app may be inactive.
+		mygo.App.Focus()
 	}
 }
 
@@ -164,6 +180,11 @@ func Run() error {
 		playlists: map[int64]*netease.Playlist{},
 		loadingPl: map[int64]bool{},
 		plErr:     map[int64]string{},
+		artists:   map[int64]*artistData{},
+		albums:    map[int64]*albumData{},
+		users:     map[int64]*userData{},
+		podcasts:  map[int64]*podcastData{},
+		searches:  map[route]*searchData{},
 		lyricAt:   -1,
 		queueAt:   -1,
 		cacheUsed: -1,
@@ -208,18 +229,26 @@ func Run() error {
 		if runtime.GOOS == "darwin" {
 			a.notch = newNotch(a)
 		}
+		// From the menu bar alone, the Dock icon shows while the window
+		// does.
+		a.syncDock()
+		a.win.OnShow(a.syncDock)
+		a.win.OnHide(a.syncDock)
+		// Shown or switched to the morning after, it shows the new day's.
+		a.win.OnFocus(a.freshenHome)
+		a.applyTray()
 		if shotHook != nil {
 			shotHook(a)
 		}
-		// On macOS closing the window hides it: music plays on, under the
-		// notch, and the Dock icon brings it back. Elsewhere nothing would
-		// bring it back, so closing it quits.
+		// Closing the window hides it: music plays on, and the Dock icon
+		// or the tray's brings it back. A Linux desktop without a tray
+		// has neither, so there closing it quits.
 		a.win.OnClose(func(e *mygo.CloseEvent) {
 			if a.quitting {
 				return
 			}
 			e.PreventDefault()
-			if runtime.GOOS == "darwin" {
+			if runtime.GOOS == "darwin" || a.tray != nil {
 				a.win.Hide()
 			} else {
 				mygo.App.Quit()
@@ -231,6 +260,13 @@ func Run() error {
 		a.settings.Volume = a.volume
 		a.settings.save()
 		a.saveSession()
+	})
+	// Windows leaves an icon in the notification area after its app until
+	// the pointer passes over it.
+	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		if a.tray != nil {
+			a.tray.Destroy()
+		}
 	})
 	mygo.App.OnWindowAllClosed(func() {})
 	mygo.App.OnActivate(func(bool) { a.showMain() })

@@ -13,7 +13,6 @@ import (
 // ones, and the latest, loaded a page at a time as they scroll.
 type commentState struct {
 	track   int64
-	program int64
 	hot     []netease.Comment
 	latest  []netease.Comment
 	total   int
@@ -32,12 +31,7 @@ const commentPage = 30
 // pane's tab.
 func (a *app) commentsFor(tr *netease.Track) *commentState {
 	cs := &a.comments
-	// Programs share audio IDs with songs, but not their comments.
-	if tr.ProgramID > 0 {
-		*cs = commentState{track: tr.ID, program: tr.ProgramID, loaded: true}
-		return cs
-	}
-	if cs.track != tr.ID || cs.program > 0 {
+	if cs.track != tr.ID {
 		*cs = commentState{track: tr.ID}
 		a.loadComments()
 	}
@@ -47,7 +41,7 @@ func (a *app) commentsFor(tr *netease.Track) *commentState {
 // loadComments loads the next page of comments.
 func (a *app) loadComments() {
 	cs := &a.comments
-	if cs.loading || cs.program > 0 {
+	if cs.loading {
 		return
 	}
 	id, offset := cs.track, len(cs.latest)
@@ -55,7 +49,7 @@ func (a *app) loadComments() {
 	go func() {
 		page, err := netease.SongComments(id, offset, commentPage)
 		a.post(func() {
-			if cs.track != id || cs.program > 0 {
+			if cs.track != id {
 				return
 			}
 			cs.loading = false

@@ -2,187 +2,95 @@ package netease
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/url"
 	"strconv"
-	"strings"
 )
 
-type ArtistEventPage struct {
-	Events   []ArtistEvent
-	LastTime int64
-	More     bool
-	UserID   int64
+// Event is something posted to an account's feed: words, pictures, and
+// maybe what it shares.
+type Event struct {
+	ID       int64 `json:"id"`
+	Time     int64 `json:"eventTime"` // Unix milliseconds
+	User     User  `json:"user"`
+	Pictures []struct {
+		SquareURL string `json:"squareUrl"`
+	} `json:"pics"`
+	Info struct {
+		LikedCount   int `json:"likedCount"`
+		CommentCount int `json:"commentCount"`
+		ShareCount   int `json:"shareCount"`
+	} `json:"info"`
+	Content EventContent `json:"-"`
 }
 
-type ArtistEvent struct {
-	ID       int64                `json:"id"`
-	Type     int                  `json:"type"`
-	Time     int64                `json:"eventTime"`
-	User     User                 `json:"user"`
-	Pictures []ArtistEventPicture `json:"pics"`
-	Info     ArtistEventInfo      `json:"info"`
-	Content  ArtistEventContent   `json:"-"`
+// EventContent is what an event says and shares.
+type EventContent struct {
+	Msg      string
+	Song     *Track
+	Album    *AlbumProfile
+	Artist   *ArtistProfile
+	Playlist *Playlist
+	Video    bool // an MV or video, which the app can't play
+	// Forwarded is the event it passes on, as its poster's name and words.
+	Forwarded string
 }
 
-type ArtistEventPicture struct {
-	OriginURL   string `json:"originUrl"`
-	SquareURL   string `json:"squareUrl"`
-	PCSquareURL string `json:"pcSquareUrl"`
+// eventJSON is the content of an event, which comes as a string of JSON.
+type eventJSON struct {
+	Msg      string         `json:"msg"`
+	Song     *legacyTrack   `json:"song"`
+	Album    *AlbumProfile  `json:"album"`
+	Artist   *ArtistProfile `json:"artist"`
+	Playlist *Playlist      `json:"playlist"`
+	MV       any            `json:"mv"`
+	Video    any            `json:"video"`
+	Event    *struct {
+		User User   `json:"user"`
+		JSON string `json:"json"`
+	} `json:"event"`
 }
 
-type ArtistEventInfo struct {
-	CommentCount int `json:"commentCount"`
-	LikedCount   int `json:"likedCount"`
-	ShareCount   int `json:"shareCount"`
-}
-
-type ArtistEventContent struct {
-	Msg           string
-	Song          *Track
-	Album         *Album
-	Artist        *Artist
-	Playlist      *Playlist
-	Video         json.RawMessage
-	MV            json.RawMessage
-	ForwardedText string
-}
-
-// ArtistEvents resolves the artist's bound account before reading its public feed.
-// Artist IDs and account IDs belong to different namespaces.
-func ArtistEvents(artistID int64, limit int, lasttime int64) (ArtistEventPage, error) {
-	if artistID <= 0 {
-		return ArtistEventPage{}, fmt.Errorf("netease: invalid artist ID")
+func decodeEvent(s string) EventContent {
+	var j eventJSON
+	if json.Unmarshal([]byte(s), &j) != nil {
+		return EventContent{}
 	}
-	uid, err := artistEventUserID(artistID)
-	if err != nil {
-		return ArtistEventPage{}, err
+	c := EventContent{Msg: j.Msg, Album: j.Album, Artist: j.Artist, Playlist: j.Playlist, Video: j.MV != nil || j.Video != nil}
+	if j.Song != nil && j.Song.ID > 0 {
+		t := j.Song.track()
+		c.Song = &t
 	}
-	if uid <= 0 {
-		return ArtistEventPage{}, nil
-	}
-	if limit <= 0 {
-		limit = 20
-	}
-	if lasttime == 0 {
-		lasttime = -1
-	}
-	var res struct {
-		Events   []json.RawMessage `json:"events"`
-		LastTime int64             `json:"lasttime"`
-		More     bool              `json:"more"`
-	}
-	q := url.Values{"getcounts": {"true"}, "time": {strconv.FormatInt(lasttime, 10)}, "limit": {strconv.Itoa(limit)}, "total": {"false"}, "fromRN": {"true"}}
-	if err := get("/api/event/get/"+strconv.FormatInt(uid, 10), q, &res); err != nil {
-		return ArtistEventPage{}, err
-	}
-	page := ArtistEventPage{LastTime: res.LastTime, More: res.More, UserID: uid}
-	for _, raw := range res.Events {
-		var event ArtistEvent
-		if err := json.Unmarshal(raw, &event); err != nil {
-			return ArtistEventPage{}, err
-		}
-		var payload struct {
-			JSON json.RawMessage `json:"json"`
-		}
-		// The outer event remains useful even when one shared object is malformed.
-		_ = json.Unmarshal(raw, &payload)
-		event.Content = decodeArtistEventContent(payload.JSON, true)
-		page.Events = append(page.Events, event)
-	}
-	return page, nil
-}
-
-func artistEventUserID(id int64) (int64, error) {
-	type binding struct {
-		UserID int64 `json:"userId"`
-		UID    int64 `json:"uid"`
-	}
-	var head struct {
-		Data struct {
-			User   binding `json:"user"`
-			Artist binding `json:"artist"`
-		} `json:"data"`
-	}
-	headErr := get("/api/artist/head/info/get", url.Values{"id": {strconv.FormatInt(id, 10)}}, &head)
-	for _, uid := range []int64{head.Data.User.UserID, head.Data.User.UID, head.Data.Artist.UserID} {
-		if headErr == nil && uid > 0 {
-			return uid, nil
-		}
-	}
-	var legacy struct {
-		UserID int64   `json:"userId"`
-		Artist binding `json:"artist"`
-	}
-	err := get("/api/artist/"+strconv.FormatInt(id, 10), nil, &legacy)
-	if err != nil {
-		if headErr == nil {
-			return 0, nil
-		}
-		return 0, err
-	}
-	if legacy.UserID > 0 {
-		return legacy.UserID, nil
-	}
-	return legacy.Artist.UserID, nil
-}
-
-// Decode fields independently so a bad attachment cannot discard the message.
-// The service normally wraps this object in a JSON string; accept an object too.
-func decodeArtistEventContent(raw json.RawMessage, forwarded bool) ArtistEventContent {
-	var out ArtistEventContent
-	if len(raw) == 0 || string(raw) == "null" {
-		return out
-	}
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		raw = json.RawMessage(text)
-	}
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil {
-		out.Msg = strings.TrimSpace(string(raw))
-		return out
-	}
-	_ = json.Unmarshal(fields["msg"], &out.Msg)
-	if value := fields["song"]; len(value) > 0 {
-		var song Track
-		if json.Unmarshal(value, &song) == nil && song.ID > 0 {
-			out.Song = &song
-		}
-	}
-	if value := fields["album"]; len(value) > 0 {
-		var album Album
-		if json.Unmarshal(value, &album) == nil && album.ID > 0 {
-			out.Album = &album
-		}
-	}
-	if value := fields["artist"]; len(value) > 0 {
-		var artist Artist
-		if json.Unmarshal(value, &artist) == nil && artist.ID > 0 {
-			out.Artist = &artist
-		}
-	}
-	if value := fields["playlist"]; len(value) > 0 {
-		var playlist Playlist
-		if json.Unmarshal(value, &playlist) == nil && playlist.ID > 0 {
-			out.Playlist = &playlist
-		}
-	}
-	out.Video, out.MV = fields["video"], fields["mv"]
-	if forwarded && len(fields["event"]) > 0 {
-		var original struct {
-			User User            `json:"user"`
-			JSON json.RawMessage `json:"json"`
-		}
-		if json.Unmarshal(fields["event"], &original) == nil {
-			content := decodeArtistEventContent(original.JSON, false)
-			if content.Msg != "" {
-				out.ForwardedText = content.Msg
-				if original.User.Nickname != "" {
-					out.ForwardedText = original.User.Nickname + "：" + content.Msg
-				}
+	if j.Event != nil {
+		var fw eventJSON
+		if json.Unmarshal([]byte(j.Event.JSON), &fw) == nil && fw.Msg != "" {
+			c.Forwarded = fw.Msg
+			if name := j.Event.User.Nickname; name != "" {
+				c.Forwarded = name + "：" + fw.Msg
 			}
 		}
 	}
-	return out
+	return c
+}
+
+// Events returns up to limit of an account's events posted before a time
+// in Unix milliseconds, or the latest ones for -1, with the time of the
+// last returned to go on from, and whether there are more.
+func Events(uid int64, limit int, before int64) (events []Event, last int64, more bool, err error) {
+	var res struct {
+		Events []struct {
+			Event
+			JSON string `json:"json"`
+		} `json:"events"`
+		LastTime int64 `json:"lasttime"`
+		More     bool  `json:"more"`
+	}
+	q := url.Values{"time": {strconv.FormatInt(before, 10)}, "limit": {strconv.Itoa(limit)}, "getcounts": {"true"}, "total": {"false"}}
+	if err := get("/api/event/get/"+strconv.FormatInt(uid, 10), q, &res); err != nil {
+		return nil, 0, false, err
+	}
+	for _, e := range res.Events {
+		e.Content = decodeEvent(e.JSON)
+		events = append(events, e.Event)
+	}
+	return events, res.LastTime, res.More, nil
 }

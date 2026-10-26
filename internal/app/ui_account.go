@@ -51,19 +51,13 @@ func (a *app) signedIn(prof *netease.Profile) {
 	// the listener play their songs is back.
 	a.restoreSession()
 	a.mine, a.saved, a.recPlaylists, a.liked = nil, nil, nil, nil
-	// What the listener may play changed: load the lists again.
+	// What the listener may play, and follows, changed: load the pages
+	// again.
 	a.playlists = map[int64]*netease.Playlist{}
 	a.plErr = map[int64]string{}
-	if a.route.page == pagePlaylist {
-		a.loadPlaylist(a.route.playlist, false)
-	}
-	a.refreshSearch()
-	a.catalog = catalogState{}
-	if a.route.page == pageArtist || a.route.page == pageAlbum || a.route.page == pageUser {
-		a.loadEntity(a.route)
-	} else if a.route.page == pagePodcast {
-		a.loadPodcast(a.route.entity)
-	}
+	a.artists, a.albums, a.users, a.podcasts = map[int64]*artistData{}, map[int64]*albumData{}, map[int64]*userData{}, map[int64]*podcastData{}
+	a.searches = map[route]*searchData{}
+	a.load(a.route)
 	a.loadHome()
 	if prof == nil {
 		return
@@ -361,7 +355,7 @@ func (a *app) myPlaylists(c *ui.Context, title string, lists []netease.Playlist,
 	}
 	for i := range lists {
 		pl := &lists[i]
-		selected := a.route.page == pagePlaylist && a.route.playlist == pl.ID && !a.nowPlaying
+		selected := a.route.page == pagePlaylist && a.route.id == pl.ID && !a.nowPlaying
 		b := ui.ButtonBase(c.Key(pl.ID)).Height(34).PaddingX(8).Gap(10).Radius(8).AlignItems(ui.Center).Justify(ui.Start).FocusRing(false).Label(pl.Name)
 		switch {
 		case selected:
@@ -385,7 +379,7 @@ func (a *app) myPlaylists(c *ui.Context, title string, lists []netease.Playlist,
 			})
 		}
 		if b.Clicked() {
-			a.open(route{page: pagePlaylist, playlist: pl.ID})
+			a.open(route{page: pagePlaylist, id: pl.ID})
 		}
 	}
 }
